@@ -79,7 +79,7 @@ func TestLoadClientResolversSupportsScopedIPv6(t *testing.T) {
 	}
 }
 
-func TestLoadClientResolversDropsDuplicateIPsEvenWithDifferentPorts(t *testing.T) {
+func TestLoadClientResolversDropsDuplicateEndpointsButKeepsDistinctPorts(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "client_resolvers.txt")
 
@@ -97,11 +97,11 @@ func TestLoadClientResolversDropsDuplicateIPsEvenWithDifferentPorts(t *testing.T
 		t.Fatalf("LoadClientResolvers returned error: %v", err)
 	}
 
-	if len(resolvers) != 1 {
-		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 1)
+	if len(resolvers) != 2 {
+		t.Fatalf("unexpected resolver count: got=%d want=2", len(resolvers))
 	}
-	if resolvers[0].IP != "8.8.8.8" || resolvers[0].Port != 53 {
-		t.Fatalf("unexpected resolver entry: %+v", resolvers[0])
+	if resolvers[0].IP != "8.8.8.8" || resolvers[0].Port != 53 || resolvers[1].IP != "8.8.8.8" || resolvers[1].Port != 5353 {
+		t.Fatalf("unexpected resolver entries: %+v", resolvers)
 	}
 	if resolverMap["8.8.8.8"] != 53 {
 		t.Fatalf("unexpected resolver map port: got=%d want=%d", resolverMap["8.8.8.8"], 53)
@@ -128,13 +128,27 @@ bad ip
 		t.Fatalf("LoadClientResolvers returned error: %v", err)
 	}
 
-	if len(resolvers) != 2 {
-		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 2)
+	if len(resolvers) != 3 {
+		t.Fatalf("unexpected resolver count: got=%d want=3", len(resolvers))
 	}
 	if resolverMap["8.8.8.8"] != 53 {
 		t.Fatalf("unexpected port for 8.8.8.8: got=%d want=%d", resolverMap["8.8.8.8"], 53)
 	}
 	if resolverMap["1.1.1.1"] != 5353 {
 		t.Fatalf("unexpected port for 1.1.1.1: got=%d want=%d", resolverMap["1.1.1.1"], 5353)
+	}
+}
+
+func TestLoadClientResolversKeepsSameIPOnDistinctPorts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolvers.txt")
+	if err := os.WriteFile(path, []byte("5.196.80.66:53\n5.196.80.66:43629\n5.196.80.66:43629\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvers, _, err := LoadClientResolvers(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolvers) != 2 || resolvers[0].Port != 53 || resolvers[1].Port != 43629 {
+		t.Fatalf("same resolver IP on distinct ports was lost: %+v", resolvers)
 	}
 }

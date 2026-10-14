@@ -383,7 +383,11 @@ func runTunnelEchoOnDNSHostWithOptions(t *testing.T, serverMethod, clientMethod 
 	serverBin := filepath.Join(work, binName("server"))
 	clientBin := filepath.Join(work, binName("client"))
 	buildBinary(t, root, "./cmd/server", serverBin)
-	buildBinary(t, root, "./cmd/client", clientBin)
+	clientRoot := root
+	if pinnedClientRoot := strings.TrimSpace(os.Getenv("COTTENDNS_E2E_CLIENT_ROOT")); pinnedClientRoot != "" {
+		clientRoot = pinnedClientRoot
+	}
+	buildBinary(t, clientRoot, "./cmd/client", clientBin)
 
 	echoPort := startEchoServer(t)
 	udpPort := freeUDPPortForHost(t, dnsHost)
@@ -618,9 +622,16 @@ ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
 			len(got), payloadSize, commonPrefix(got, payload))
 	}
 	if runtimeOpts.requireCustomPort {
-		wantTransport := fmt.Sprintf("UDP/%d", udpPort)
-		if !strings.Contains(clientLog.String(), wantTransport) {
-			t.Fatalf("client log lacks custom transport label %q\n--- client log ---\n%s", wantTransport, clientLog.String())
+		if strings.TrimSpace(os.Getenv("COTTENDNS_E2E_CLIENT_ROOT")) != "" {
+			wantEndpoint := net.JoinHostPort(dnsHost, fmt.Sprintf("%d", udpPort))
+			if !strings.Contains(clientLog.String(), wantEndpoint) {
+				t.Fatalf("pinned client log lacks non-default resolver endpoint %q\n--- client log ---\n%s", wantEndpoint, clientLog.String())
+			}
+		} else {
+			wantTransport := fmt.Sprintf("UDP/%d", udpPort)
+			if !strings.Contains(clientLog.String(), wantTransport) {
+				t.Fatalf("client log lacks custom transport label %q\n--- client log ---\n%s", wantTransport, clientLog.String())
+			}
 		}
 	}
 	if runtimeOpts.gracefulServerStop {
