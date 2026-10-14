@@ -59,6 +59,60 @@ func (t resolverTransport) String() string {
 	}
 }
 
+func (t resolverTransport) labelForEndpoint(resolverLabel string) string {
+	if t == transportDoT || t == transportDoH {
+		return t.String()
+	}
+
+	port := 53
+	if _, rawPort, err := net.SplitHostPort(strings.TrimSpace(resolverLabel)); err == nil {
+		if parsed, parseErr := strconv.Atoi(rawPort); parseErr == nil && parsed >= 1 && parsed <= 65535 {
+			port = parsed
+		}
+	}
+
+	if t == transportTCP {
+		return "TCP/" + strconv.Itoa(port)
+	}
+	return "UDP/" + strconv.Itoa(port)
+}
+
+func (c *Client) transportStatusLabel() string {
+	if c == nil {
+		return transportUDP.String()
+	}
+	t := c.activeTransport()
+	if t == transportDoT || t == transportDoH {
+		return t.String()
+	}
+
+	c.mtuStateMu.Lock()
+	defer c.mtuStateMu.Unlock()
+
+	label := ""
+	for i := range c.connections {
+		conn := &c.connections[i]
+		if !conn.IsValid || conn.Backup || conn.ResolverLabel == "" {
+			continue
+		}
+		current := t.labelForEndpoint(conn.ResolverLabel)
+		if label == "" {
+			label = current
+			continue
+		}
+		if current != label {
+			if t == transportTCP {
+				return "TCP/mixed"
+			}
+			return "UDP/mixed"
+		}
+	}
+	if label != "" {
+		return label
+	}
+	return t.String()
+}
+
 // resolverTransportFromName maps a RESOLVER_TRANSPORT value to the transport the
 // client starts on. "auto" starts on UDP and is escalated to TCP by the fallback
 // in RunInitialMTUTests.

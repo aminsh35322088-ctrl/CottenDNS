@@ -759,11 +759,12 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn *Connection, ser
 	rejectedNow := counters.rejectUpload.Load() + counters.rejectDownload.Load()
 	if c.log != nil && c.log.Enabled(logger.LevelInfo) {
 		c.log.Infof(
-			"<green>✅ Accepted (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | upload=<cyan>%d</cyan> | download=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></green>",
+			"<green>✅ Accepted (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> <gray>(%s)</gray> | upload=<cyan>%d</cyan> | download=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></green>",
 			completed,
 			total,
 			accepted.Domain,
 			accepted.ResolverLabel,
+			c.activeTransport().labelForEndpoint(accepted.ResolverLabel),
 			accepted.UploadMTUBytes,
 			accepted.DownloadMTUBytes,
 			validNow,
