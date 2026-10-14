@@ -25,15 +25,18 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -175,11 +178,26 @@ func TestBotKeepCustomPortEndToEnd(t *testing.T) {
 	runBotKeepTunnelEcho(t)
 }
 
+func TestBotKeepCustomPortHTTPS200(t *testing.T) {
+	healthAddress := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	runTunnelEchoOnDNSHostWithOptions(
+		t, 1, 1, "", "", "", "127.0.0.1",
+		tunnelRuntimeOptions{
+			serverArgs:         []string{"--non-interactive", "--metrics-address", healthAddress},
+			healthAddress:      healthAddress,
+			requireCustomPort:  true,
+			gracefulServerStop: true,
+			httpsProbe:         true,
+		},
+	)
+}
+
 type tunnelRuntimeOptions struct {
 	serverArgs         []string
 	healthAddress      string
 	requireCustomPort  bool
 	gracefulServerStop bool
+	httpsProbe         bool
 }
 
 type detailedHealthResponse struct {
@@ -389,7 +407,23 @@ func runTunnelEchoOnDNSHostWithOptions(t *testing.T, serverMethod, clientMethod 
 	}
 	buildBinary(t, clientRoot, "./cmd/client", clientBin)
 
-	echoPort := startEchoServer(t)
+	forwardPort := startEchoServer(t)
+	var httpsServer *httptest.Server
+	if runtimeOpts.httpsProbe {
+		httpsServer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "tunnel-ok")
+		}))
+		t.Cleanup(httpsServer.Close)
+		_, portText, err := net.SplitHostPort(strings.TrimPrefix(httpsServer.URL, "https://"))
+		if err != nil {
+			t.Fatalf("parse local HTTPS server address: %v", err)
+		}
+		forwardPort, err = strconv.Atoi(portText)
+		if err != nil {
+			t.Fatalf("parse local HTTPS server port: %v", err)
+		}
+	}
 	udpPort := freeUDPPortForHost(t, dnsHost)
 	if runtimeOpts.requireCustomPort && udpPort == 53 {
 		t.Fatal("BotKeep qualification unexpectedly selected privileged DNS port 53")
@@ -400,7 +434,7 @@ func runTunnelEchoOnDNSHostWithOptions(t *testing.T, serverMethod, clientMethod 
 	clientCfg := filepath.Join(work, "client_config.toml")
 	keyFile := filepath.Join(work, "encrypt_key.txt")
 
-	// Server: TCP mode, forwards every tunneled connection to the echo server.
+	// Server: TCP mode, forwards every tunneled connection to the local test target.
 	if err := os.WriteFile(serverCfg, []byte(fmt.Sprintf(`
 PROTOCOL_TYPE = "TCP"
 UDP_HOST = %q
@@ -446,7 +480,7 @@ ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
 ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 120.0
 ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
 %s
-`, dnsHost, udpPort, defaultLine(serverExtra, "DOMAIN", `DOMAIN = ["a.io"]`), serverMethod, echoPort, serverExtra)), 0644); err != nil {
+`, dnsHost, udpPort, defaultLine(serverExtra, "DOMAIN", `DOMAIN = ["a.io"]`), serverMethod, forwardPort, serverExtra)), 0644); err != nil {
 		t.Fatalf("write server cfg: %v", err)
 	}
 
@@ -570,56 +604,82 @@ ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
 			err, clientLog.String(), serverLog.String())
 	}
 
-	// Push a payload through the tunnel and assert it echoes back intact.
-	const payloadSize = 64 * 1024
-	payload := make([]byte, payloadSize)
-	for i := range payload {
-		payload[i] = byte('A' + (i % 26))
-	}
-
-	var conn net.Conn
-	var dialErr error
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, dialErr = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", clientPort), 3*time.Second)
-		if dialErr == nil {
-			break
+	if runtimeOpts.httpsProbe {
+		transport, ok := httpsServer.Client().Transport.(*http.Transport)
+		if !ok {
+			t.Fatal("test HTTPS server did not provide an HTTP transport")
 		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if dialErr != nil {
-		t.Fatalf("dial client listener: %v\n--- client log ---\n%s", dialErr, clientLog.String())
-	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
-
-	writeErr := make(chan error, 1)
-	go func() {
-		_, err := conn.Write(payload)
-		writeErr <- err
-	}()
-
-	got := make([]byte, 0, payloadSize)
-	buf := make([]byte, 16*1024)
-	for len(got) < payloadSize {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			got = append(got, buf[:n]...)
+		transport = transport.Clone()
+		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			address := net.JoinHostPort("127.0.0.1", strconv.Itoa(clientPort))
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, network, address)
 		}
+		client := &http.Client{Transport: transport, Timeout: 60 * time.Second}
+		response, err := client.Get(httpsServer.URL)
 		if err != nil {
-			t.Fatalf("read echo (%d/%d bytes): %v\n--- client log ---\n%s\n--- server log ---\n%s",
-				len(got), payloadSize, err, clientLog.String(), serverLog.String())
+			t.Fatalf("HTTPS request through custom-port tunnel failed: %v", err)
 		}
-	}
+		body, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		transport.CloseIdleConnections()
+		if readErr != nil {
+			t.Fatalf("read HTTPS response: %v", readErr)
+		}
+		if response.StatusCode != http.StatusOK || string(body) != "tunnel-ok" {
+			t.Fatalf("unexpected HTTPS response: status=%d body=%q", response.StatusCode, body)
+		}
+	} else {
+		// Push a payload through the tunnel and assert it echoes back intact.
+		const payloadSize = 64 * 1024
+		payload := make([]byte, payloadSize)
+		for i := range payload {
+			payload[i] = byte('A' + (i % 26))
+		}
 
-	if err := <-writeErr; err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
+		var conn net.Conn
+		var dialErr error
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			conn, dialErr = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", clientPort), 3*time.Second)
+			if dialErr == nil {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		if dialErr != nil {
+			t.Fatalf("dial client listener: %v\n--- client log ---\n%s", dialErr, clientLog.String())
+		}
+		defer conn.Close()
 
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("echo mismatch: got %d bytes, want %d, equal-prefix=%d",
-			len(got), payloadSize, commonPrefix(got, payload))
+		_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+
+		writeErr := make(chan error, 1)
+		go func() {
+			_, err := conn.Write(payload)
+			writeErr <- err
+		}()
+
+		got := make([]byte, 0, payloadSize)
+		buf := make([]byte, 16*1024)
+		for len(got) < payloadSize {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				got = append(got, buf[:n]...)
+			}
+			if err != nil {
+				t.Fatalf("read echo (%d/%d bytes): %v\n--- client log ---\n%s\n--- server log ---\n%s",
+					len(got), payloadSize, err, clientLog.String(), serverLog.String())
+			}
+		}
+
+		if err := <-writeErr; err != nil {
+			t.Fatalf("write payload: %v", err)
+		}
+
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("echo mismatch: got %d bytes, want %d, equal-prefix=%d",
+				len(got), payloadSize, commonPrefix(got, payload))
+		}
 	}
 	if runtimeOpts.requireCustomPort {
 		if strings.TrimSpace(os.Getenv("COTTENDNS_E2E_CLIENT_ROOT")) != "" {
