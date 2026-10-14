@@ -1,0 +1,26 @@
+# CottenDNS server profile for BotKeep direct mode.
+#
+# REQUIRED before deployment:
+#   1. Replace DOMAIN with the tunnel domain used by the client.
+#   2. Replace UDP_PORT with the UDP port allocated by the BotKeep provider.
+#   3. Keep ENCRYPTION_KEY_FILE private and persistent across restarts.
+#
+# 10053 is an unprivileged example value only. It is not a required BotKeep port.
+
+DOMAIN = ["v.example.invalid"]
+PROTOCOL_TYPE = "SOCKS5"
+
+UDP_HOST = "0.0.0.0"
+UDP_PORT = 10053
+UDP_IPV6_ENABLED = false
+
+# Direct BotKeep mode uses the provider's allocated UDP ingress only.
+TCP_LISTENER_ENABLED = false
+TCP_IPV6_ENABLED = false
+DOT_LISTENER_ENABLED = false
+DOH_LISTENER_ENABLED = false
+ACME_ENABLED = false
+
+DATA_ENCRYPTION_METHOD = 3
+ENCRYPTION_KEY_FILE = "encrypt_key.txt"
+LOG_LEVEL = "INFO"

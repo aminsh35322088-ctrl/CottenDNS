@@ -90,6 +90,20 @@ func TestShippedClientTemplateKeepsLongSessionRecoveryDefaults(t *testing.T) {
 	}
 }
 
+func TestBotKeepServerTemplateParsesDirectMode(t *testing.T) {
+	cfg, err := LoadServerConfig(repoFile("server_config.botkeep.toml"))
+	if err != nil {
+		t.Fatalf("server_config.botkeep.toml failed to load: %v", err)
+	}
+	if cfg.UDPPort == 53 || cfg.UDPPort <= 0 {
+		t.Fatalf("BotKeep template UDP_PORT = %d, want an unprivileged non-53 example port", cfg.UDPPort)
+	}
+	if cfg.TCPListenerEnabled || cfg.DoTListenerEnabled || cfg.DoHListenerEnabled || cfg.ACMEEnabled {
+		t.Fatalf("BotKeep direct profile unexpectedly enables extra listeners: tcp=%v dot=%v doh=%v acme=%v",
+			cfg.TCPListenerEnabled, cfg.DoTListenerEnabled, cfg.DoHListenerEnabled, cfg.ACMEEnabled)
+	}
+}
+
 func TestBundledPresetTemplatesParse(t *testing.T) {
 	serverPresets := []string{
 		"server_config.speed.toml",
