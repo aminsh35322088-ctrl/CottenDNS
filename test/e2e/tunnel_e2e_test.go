@@ -25,9 +25,11 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,6 +171,81 @@ func TestTunnelEndToEndEcho(t *testing.T) {
 	runTunnelEcho(t, 1, 1, "", "", "")
 }
 
+func TestBotKeepCustomPortEndToEnd(t *testing.T) {
+	runBotKeepTunnelEcho(t)
+}
+
+type tunnelRuntimeOptions struct {
+	serverArgs         []string
+	healthAddress      string
+	requireCustomPort  bool
+	gracefulServerStop bool
+}
+
+type detailedHealthResponse struct {
+	Status     string `json:"status"`
+	Transports struct {
+		UDPUp bool `json:"udp_up"`
+	} `json:"transports"`
+}
+
+func waitForDetailedHealth(address string, timeout time.Duration) error {
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://" + address + "/healthz?details=1")
+		if err == nil {
+			var health detailedHealthResponse
+			decodeErr := json.NewDecoder(resp.Body).Decode(&health)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && decodeErr == nil && health.Status == "ok" && health.Transports.UDPUp {
+				return nil
+			}
+			if decodeErr != nil {
+				lastErr = decodeErr
+			} else {
+				lastErr = fmt.Errorf("health not ready: status=%q udp_up=%v", health.Status, health.Transports.UDPUp)
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for detailed health at %s: %w", address, lastErr)
+}
+
+func stopProcessGracefully(cmd *exec.Cmd, timeout time.Duration) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("process did not exit within %s", timeout)
+	}
+}
+
+func runBotKeepTunnelEcho(t *testing.T) {
+	t.Helper()
+	healthAddress := fmt.Sprintf("127.0.0.1:%d", freeTCPPort(t))
+	runTunnelEchoOnDNSHostWithOptions(
+		t, 1, 1, "", "", "", "127.0.0.1",
+		tunnelRuntimeOptions{
+			serverArgs:         []string{"--non-interactive", "--metrics-address", healthAddress},
+			healthAddress:      healthAddress,
+			requireCustomPort:  true,
+			gracefulServerStop: true,
+		},
+	)
+}
+
 func TestTunnelEndToEndEncryptionAutoDetect(t *testing.T) {
 	// Server configured for method 1 (XOR); client uses method 3 (AES-128-GCM)
 	// with the same shared key. The tunnel must still come up, proving the
@@ -293,6 +370,10 @@ func requireIPv6Loopback(t *testing.T) {
 }
 
 func runTunnelEchoOnDNSHost(t *testing.T, serverMethod, clientMethod int, serverExtra, clientQueryTypes, clientExtra, dnsHost string, resolverHosts ...string) string {
+	return runTunnelEchoOnDNSHostWithOptions(t, serverMethod, clientMethod, serverExtra, clientQueryTypes, clientExtra, dnsHost, tunnelRuntimeOptions{}, resolverHosts...)
+}
+
+func runTunnelEchoOnDNSHostWithOptions(t *testing.T, serverMethod, clientMethod int, serverExtra, clientQueryTypes, clientExtra, dnsHost string, runtimeOpts tunnelRuntimeOptions, resolverHosts ...string) string {
 	if clientQueryTypes == "" {
 		clientQueryTypes = `["TXT", "CNAME", "A", "AAAA"]`
 	}
@@ -306,6 +387,9 @@ func runTunnelEchoOnDNSHost(t *testing.T, serverMethod, clientMethod int, server
 
 	echoPort := startEchoServer(t)
 	udpPort := freeUDPPortForHost(t, dnsHost)
+	if runtimeOpts.requireCustomPort && udpPort == 53 {
+		t.Fatal("BotKeep qualification unexpectedly selected privileged DNS port 53")
+	}
 	clientPort := freeTCPPort(t)
 
 	serverCfg := filepath.Join(work, "server_config.toml")
@@ -363,7 +447,9 @@ ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
 	}
 
 	serverLog := &safeBuf{}
-	serverCmd := exec.Command(serverBin, "--config", serverCfg)
+	serverArgs := []string{"--config", serverCfg}
+	serverArgs = append(serverArgs, runtimeOpts.serverArgs...)
+	serverCmd := exec.Command(serverBin, serverArgs...)
 	serverCmd.Dir = work
 	serverCmd.Stdout = serverLog
 	serverCmd.Stderr = serverLog
@@ -374,6 +460,11 @@ ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
 
 	if err := waitForFile(keyFile, 20*time.Second); err != nil {
 		t.Fatalf("server did not generate key file: %v\n--- server log ---\n%s", err, serverLog.String())
+	}
+	if runtimeOpts.healthAddress != "" {
+		if err := waitForDetailedHealth(runtimeOpts.healthAddress, 15*time.Second); err != nil {
+			t.Fatalf("server health did not become ready: %v\n--- server log ---\n%s", err, serverLog.String())
+		}
 	}
 	keyData, _ := os.ReadFile(keyFile)
 	encryptionKey := strings.TrimSpace(string(keyData))
@@ -525,6 +616,20 @@ ARQ_DATA_NACK_REPEAT_SECONDS = 0.8
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("echo mismatch: got %d bytes, want %d, equal-prefix=%d",
 			len(got), payloadSize, commonPrefix(got, payload))
+	}
+	if runtimeOpts.requireCustomPort {
+		wantTransport := fmt.Sprintf("UDP/%d", udpPort)
+		if !strings.Contains(clientLog.String(), wantTransport) {
+			t.Fatalf("client log lacks custom transport label %q\n--- client log ---\n%s", wantTransport, clientLog.String())
+		}
+	}
+	if runtimeOpts.gracefulServerStop {
+		if runtime.GOOS == "windows" {
+			t.Skip("graceful BotKeep process signal qualification requires Unix-style interrupt signals")
+		}
+		if err := stopProcessGracefully(serverCmd, 10*time.Second); err != nil {
+			t.Fatalf("graceful server shutdown failed: %v\n--- server log ---\n%s", err, serverLog.String())
+		}
 	}
 	return clientLog.String()
 }

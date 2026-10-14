@@ -58,7 +58,7 @@ func (c *Client) StatusSnapshot() StatusSnapshot {
 	}
 	s := StatusSnapshot{
 		Phase:               clientPhaseName(c.runtimePhase.Load()),
-		Transport:           c.activeTransport().String(),
+		Transport:           c.transportStatusLabel(),
 		FamilyMode:          c.cfg.ResolverIPMode,
 		ProxyAddress:        net.JoinHostPort(c.cfg.ListenIP, strconv.Itoa(c.cfg.ListenPort)),
 		LocalDNSEnabled:     c.cfg.LocalDNSEnabled,

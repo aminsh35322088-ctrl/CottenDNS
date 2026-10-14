@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -26,9 +27,12 @@ import (
 	"cottendns-go/internal/version"
 )
 
-func waitForExitInput() {
-	_, _ = fmt.Fprint(os.Stderr, "Press Enter to exit...")
-	reader := bufio.NewReader(os.Stdin)
+func pauseOnStartupFailure(nonInteractive bool, in io.Reader, out io.Writer) {
+	if nonInteractive {
+		return
+	}
+	_, _ = fmt.Fprint(out, "Press Enter to exit...")
+	reader := bufio.NewReader(in)
 	_, _ = reader.ReadString('\n')
 }
 
@@ -37,6 +41,7 @@ func main() {
 	logPath := flag.String("log", "", "Path to log file (optional)")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	metricsAddress := flag.String("metrics-address", "", "Optional HTTP health/Prometheus listen address (for example 127.0.0.1:9090)")
+	nonInteractive := flag.Bool("non-interactive", false, "Exit immediately on startup failures instead of waiting for Enter")
 	configFlags, err := config.NewServerConfigFlagBinder(flag.CommandLine)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Server flag setup failed: %v\n", err)
@@ -54,7 +59,7 @@ func main() {
 	cfg, err := config.LoadServerConfigWithOverrides(resolvedConfigPath, configFlags.Overrides())
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Server startup failed: %v\n", err)
-		waitForExitInput()
+		pauseOnStartupFailure(*nonInteractive, os.Stdin, os.Stderr)
 		os.Exit(1)
 	}
 
@@ -76,14 +81,14 @@ func main() {
 	keyInfo, err := security.EnsureServerEncryptionKey(cfg)
 	if err != nil {
 		log.Errorf("\u274C <red>Encryption Key Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
-		waitForExitInput()
+		pauseOnStartupFailure(*nonInteractive, os.Stdin, os.Stderr)
 		os.Exit(1)
 	}
 
 	codec, err := security.NewCodecFromConfig(cfg, keyInfo.Key)
 	if err != nil {
 		log.Errorf("\u274C <red>Encryption Codec Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
-		waitForExitInput()
+		pauseOnStartupFailure(*nonInteractive, os.Stdin, os.Stderr)
 		os.Exit(1)
 	}
 
@@ -97,7 +102,7 @@ func main() {
 		codecSet, setErr := security.NewCodecSet(autoDetectMethods, keyInfo.Key)
 		if setErr != nil {
 			log.Errorf("❌ <red>Encryption Codec Set Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", setErr)
-			waitForExitInput()
+			pauseOnStartupFailure(*nonInteractive, os.Stdin, os.Stderr)
 			os.Exit(1)
 		}
 		preferred := 0
@@ -141,7 +146,7 @@ func main() {
 		)
 	} else {
 		log.Errorf("\u26A0\uFE0F <yellow>No Allowed Domains Configured!</yellow>")
-		waitForExitInput()
+		pauseOnStartupFailure(*nonInteractive, os.Stdin, os.Stderr)
 		os.Exit(1)
 	}
 

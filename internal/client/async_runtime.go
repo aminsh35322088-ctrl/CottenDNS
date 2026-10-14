@@ -388,7 +388,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 			c.streamData = newTCPDataManager(c)
 		}
 		c.streamData.Start(runtimeCtx)
-		c.log.Infof("\U0001F517 <cyan>Resolver transport: <green>%s</green></cyan>", active)
+		c.log.Infof("\U0001F517 <cyan>Resolver transport: <green>%s</green></cyan>", c.transportStatusLabel())
 	} else {
 		for i, conn := range conns {
 			c.asyncWG.Add(1)
